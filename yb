@@ -1,0 +1,218 @@
+#!/usr/bin/env python3
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+
+CONFIG_PATH = os.path.expanduser("~/.ybconfig.json")
+ROBOT_IP = "192.168.43.1"
+ADB_PORT = "5555"
+
+def load_config():
+    if not os.path.exists(CONFIG_PATH):
+        return None
+    try:
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        return None
+
+def save_config(ssid, password):
+    config = {
+        "ssid": ssid,
+        "password": password
+    }
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=4)
+    print(f"Saved configuration to {CONFIG_PATH}")
+
+def run_cmd(cmd, check=True, quiet=False):
+    if not quiet:
+        print(f"> {' '.join(cmd)}")
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if check and result.returncode != 0:
+        if not quiet:
+            print(f"Command failed with code {result.returncode}")
+            print(result.stdout)
+            print(result.stderr)
+        sys.exit(result.returncode)
+    return result
+
+def run_cmd_live(cmd):
+    # Run a command with live streaming output
+    print(f"> {' '.join(cmd)}")
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True
+    )
+    for line in iter(process.stdout.readline, ''):
+        print(line, end='')
+    process.stdout.close()
+    return_code = process.wait()
+    if return_code != 0:
+        print(f"Command failed with code {return_code}")
+        sys.exit(return_code)
+
+def get_current_wifi():
+    # macOS specific command to get current Wi-Fi SSID
+    result = run_cmd(["networksetup", "-getairportnetwork", "en0"], check=False, quiet=True)
+    if result.returncode == 0 and "Current Wi-Fi Network:" in result.stdout:
+        ssid = result.stdout.split("Current Wi-Fi Network:")[1].strip()
+        if ssid != "<redacted>":
+            return ssid
+    return None
+
+def get_wifi_power():
+    result = run_cmd(["networksetup", "-getairportpower", "en0"], check=False, quiet=True)
+    if result.returncode == 0 and "On" in result.stdout:
+        return True
+    return False
+
+def connect_wifi(ssid, password):
+    # Connect to a Wi-Fi network with password on macOS
+    print(f"Connecting to Wi-Fi network: {ssid}...")
+    result = run_cmd(["networksetup", "-setairportnetwork", "en0", ssid, password], check=False)
+    
+    if result.returncode != 0 or "Could not find network" in result.stdout or "Failed to join" in result.stdout:
+        print(f"Error connecting to network {ssid}:")
+        if result.stdout.strip():
+            print(result.stdout.strip())
+        else:
+            print("Failed silently or password incorrect.")
+        sys.exit(1)
+    
+    # Wait a few seconds for an IP to be assigned
+    print("Waiting for network to stabilize...")
+    time.sleep(3)
+    
+    # Wait until we can ping the robot IP (up to 15 seconds)
+    print(f"Waiting for robot IP {ROBOT_IP} to become reachable...")
+    for _ in range(15):
+        res = run_cmd(["ping", "-c", "1", "-W", "1", ROBOT_IP], check=False)
+        if res.returncode == 0:
+            print(f"Successfully reached {ROBOT_IP}!")
+            return
+        time.sleep(1)
+        
+    print(f"Error: Could not reach {ROBOT_IP} after connecting to {ssid}.")
+    sys.exit(1)
+
+def adb_connect():
+    print("Connecting to ADB...")
+    # Disconnect first to ensure clean state
+    run_cmd(["adb", "disconnect", f"{ROBOT_IP}:{ADB_PORT}"], check=False)
+    # Add a small delay
+    time.sleep(1)
+    # Connect
+    res = run_cmd(["adb", "connect", f"{ROBOT_IP}:{ADB_PORT}"], check=False)
+    if "connected to" not in res.stdout.lower() and "already connected" not in res.stdout.lower():
+         print(f"Failed to connect ADB: {res.stdout}")
+         sys.exit(1)
+    print("ADB Connected.")
+    # Add a small delay after connecting to assure adb daemon recognizes it
+    time.sleep(1)
+
+def adb_disconnect():
+    print("Disconnecting ADB...")
+    run_cmd(["adb", "disconnect", f"{ROBOT_IP}:{ADB_PORT}"], check=False)
+    print("ADB Disconnected.")
+
+def gradle_push(deploy_type):
+    gradlew_path = "./gradlew"
+    if not os.path.exists(gradlew_path):
+        print("Error: Could not find ./gradlew in the current directory. Are you in an Android Studio project root?")
+        sys.exit(1)
+
+    print(f"Starting {deploy_type} deployment...")
+    if deploy_type == "sloth":
+        run_cmd_live([gradlew_path, "deploySloth"])
+    elif deploy_type == "teamcode":
+        run_cmd_live([gradlew_path, "installDebug"])
+    else:
+        print(f"Unknown deploy type: {deploy_type}")
+        sys.exit(1)
+    
+    print(f"{deploy_type.capitalize()} push completed successfully.")
+
+def main():
+    parser = argparse.ArgumentParser(description="YanBridge (yb) - Quick code pushing for FTC Control Hub")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Config command
+    config_parser = subparsers.add_parser("config", help="Set Control Hub Wi-Fi credentials")
+    config_parser.add_argument("--ssid", required=True, help="Control Hub Wi-Fi SSID")
+    config_parser.add_argument("--password", required=True, help="Control Hub Wi-Fi Password")
+
+    # Push command
+    push_parser = subparsers.add_parser("push", help="Push code to the Control Hub")
+    push_parser.add_argument("type", nargs="?", choices=["sloth", "teamcode"], default="sloth", 
+                             help="Type of push to perform: 'sloth' (Sloth Load) or 'teamcode' (Standard install)")
+
+    args = parser.parse_args()
+
+    if args.command == "config":
+        save_config(args.ssid, args.password)
+    
+    elif args.command == "push":
+        config = load_config()
+        if not config:
+            print("Error: No configuration found. Please run 'yb config --ssid <SSID> --password <PASSWORD>' first.")
+            sys.exit(1)
+            
+        robot_ssid = config['ssid']
+        robot_password = config['password']
+        
+        # Save current Wi-Fi
+        original_wifi = get_current_wifi()
+        original_power = get_wifi_power()
+        
+        if original_wifi:
+            print(f"Current Wi-Fi is {original_wifi}. Will restore after push.")
+        else:
+            if original_power:
+                print("Wi-Fi is ON, but SSID cannot be read (likely macOS 14+ Location Privacy). Will cycle Wi-Fi power to auto-restore afterwards.")
+            else:
+                print("Wi-Fi is currently OFF. Will turn off after push.")
+
+        try:
+            # 1. Connect to Robot Wi-Fi
+            connect_wifi(robot_ssid, robot_password)
+            
+            # 2. Connect ADB
+            adb_connect()
+            
+            # 3. Push Code
+            gradle_push(args.type)
+            
+        finally:
+            # 4. Cleanup and Disconnect
+            adb_disconnect()
+            
+            # 5. Restore Wi-Fi
+            if original_wifi and original_wifi != robot_ssid:
+                print(f"Restoring Wi-Fi connection to {original_wifi}...")
+                # Note: We assume the original Wi-Fi is known to Keychain, so we don't need a password.
+                # Just toggling to the network name is enough on macOS if it's saved.
+                run_cmd(["networksetup", "-setairportnetwork", "en0", original_wifi], check=False, quiet=True)
+                print(f"Switched back to {original_wifi}.")
+            elif not original_wifi and not original_power:
+                print("Disconnecting from Robot Wi-Fi (turning Wi-Fi off)...")
+                run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
+                print("Switched off Wi-Fi.")
+            elif not original_wifi and original_power:
+                print("Disconnecting from Control Hub Wi-Fi (cycling Wi-Fi power) to auto-reconnect...")
+                run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
+                time.sleep(1)
+                run_cmd(["networksetup", "-setairportpower", "en0", "on"], check=False, quiet=True)
+                print("Wi-Fi cycled. macOS should automatically rejoin your default network.")
+    else:
+        parser.print_help()
+
+if __name__ == "__main__":
+    main()
