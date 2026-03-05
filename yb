@@ -51,8 +51,10 @@ def run_cmd_live(cmd):
         stderr=subprocess.STDOUT,
         universal_newlines=True
     )
+    # pyre-ignore[16]: process.stdout is guaranteed to not be None here because stdout=subprocess.PIPE
     for line in iter(process.stdout.readline, ''):
         print(line, end='')
+    # pyre-ignore[16]: process.stdout is guaranteed to not be None here
     process.stdout.close()
     return_code = process.wait()
     if return_code != 0:
@@ -60,32 +62,53 @@ def run_cmd_live(cmd):
         sys.exit(return_code)
 
 def get_current_wifi():
-    # macOS specific command to get current Wi-Fi SSID
-    result = run_cmd(["networksetup", "-getairportnetwork", "en0"], check=False, quiet=True)
-    if result.returncode == 0 and "Current Wi-Fi Network:" in result.stdout:
-        ssid = result.stdout.split("Current Wi-Fi Network:")[1].strip()
-        if ssid != "<redacted>":
-            return ssid
-    return None
+    if sys.platform == "linux" or sys.platform == "linux2":
+        result = run_cmd(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"], check=False, quiet=True)
+        if result.returncode == 0:
+            for line in result.stdout.splitlines():
+                if line.startswith("yes:"):
+                    return line.split(":", 1)[1]
+        return None
+    else:
+        # macOS specific command to get current Wi-Fi SSID
+        result = run_cmd(["networksetup", "-getairportnetwork", "en0"], check=False, quiet=True)
+        if result.returncode == 0 and "Current Wi-Fi Network:" in result.stdout:
+            ssid = result.stdout.split("Current Wi-Fi Network:")[1].strip()
+            if ssid != "<redacted>":
+                return ssid
+        return None
 
 def get_wifi_power():
-    result = run_cmd(["networksetup", "-getairportpower", "en0"], check=False, quiet=True)
-    if result.returncode == 0 and "On" in result.stdout:
-        return True
-    return False
+    if sys.platform == "linux" or sys.platform == "linux2":
+        result = run_cmd(["nmcli", "radio", "wifi"], check=False, quiet=True)
+        if result.returncode == 0 and "enabled" in result.stdout.lower():
+            return True
+        return False
+    else:
+        result = run_cmd(["networksetup", "-getairportpower", "en0"], check=False, quiet=True)
+        if result.returncode == 0 and "On" in result.stdout:
+            return True
+        return False
 
 def connect_wifi(ssid, password):
-    # Connect to a Wi-Fi network with password on macOS
     print(f"Connecting to Wi-Fi network: {ssid}...")
-    result = run_cmd(["networksetup", "-setairportnetwork", "en0", ssid, password], check=False)
-    
-    if result.returncode != 0 or "Could not find network" in result.stdout or "Failed to join" in result.stdout:
-        print(f"Error connecting to network {ssid}:")
-        if result.stdout.strip():
-            print(result.stdout.strip())
-        else:
-            print("Failed silently or password incorrect.")
-        sys.exit(1)
+    if sys.platform == "linux" or sys.platform == "linux2":
+        result = run_cmd(["nmcli", "dev", "wifi", "connect", ssid, "password", password], check=False)
+        if result.returncode != 0:
+            print(f"Error connecting to network {ssid}:")
+            print(result.stdout.strip() if result.stdout.strip() else "Failed silently or password incorrect.")
+            sys.exit(1)
+    else:
+        # Connect to a Wi-Fi network with password on macOS
+        result = run_cmd(["networksetup", "-setairportnetwork", "en0", ssid, password], check=False)
+        
+        if result.returncode != 0 or "Could not find network" in result.stdout or "Failed to join" in result.stdout:
+            print(f"Error connecting to network {ssid}:")
+            if result.stdout.strip():
+                print(result.stdout.strip())
+            else:
+                print("Failed silently or password incorrect.")
+            sys.exit(1)
     
     # Wait a few seconds for an IP to be assigned
     print("Waiting for network to stabilize...")
@@ -164,6 +187,7 @@ def main():
         if not config:
             print("Error: No configuration found. Please run 'yb config --ssid <SSID> --password <PASSWORD>' first.")
             sys.exit(1)
+        assert config is not None
             
         robot_ssid = config['ssid']
         robot_password = config['password']
@@ -197,20 +221,30 @@ def main():
             # 5. Restore Wi-Fi
             if original_wifi and original_wifi != robot_ssid:
                 print(f"Restoring Wi-Fi connection to {original_wifi}...")
-                # Note: We assume the original Wi-Fi is known to Keychain, so we don't need a password.
-                # Just toggling to the network name is enough on macOS if it's saved.
-                run_cmd(["networksetup", "-setairportnetwork", "en0", original_wifi], check=False, quiet=True)
+                # Note: We assume the original Wi-Fi is known to the OS, so we don't need a password.
+                if sys.platform == "linux" or sys.platform == "linux2":
+                    run_cmd(["nmcli", "connection", "up", original_wifi], check=False, quiet=True)
+                else:
+                    run_cmd(["networksetup", "-setairportnetwork", "en0", original_wifi], check=False, quiet=True)
                 print(f"Switched back to {original_wifi}.")
             elif not original_wifi and not original_power:
                 print("Disconnecting from Robot Wi-Fi (turning Wi-Fi off)...")
-                run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
+                if sys.platform == "linux" or sys.platform == "linux2":
+                    run_cmd(["nmcli", "radio", "wifi", "off"], check=False, quiet=True)
+                else:
+                    run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
                 print("Switched off Wi-Fi.")
             elif not original_wifi and original_power:
                 print("Disconnecting from Control Hub Wi-Fi (cycling Wi-Fi power) to auto-reconnect...")
-                run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
-                time.sleep(1)
-                run_cmd(["networksetup", "-setairportpower", "en0", "on"], check=False, quiet=True)
-                print("Wi-Fi cycled. macOS should automatically rejoin your default network.")
+                if sys.platform == "linux" or sys.platform == "linux2":
+                    run_cmd(["nmcli", "radio", "wifi", "off"], check=False, quiet=True)
+                    time.sleep(1)
+                    run_cmd(["nmcli", "radio", "wifi", "on"], check=False, quiet=True)
+                else:
+                    run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
+                    time.sleep(1)
+                    run_cmd(["networksetup", "-setairportpower", "en0", "on"], check=False, quiet=True)
+                print("Wi-Fi cycled. Your system should automatically rejoin your default network.")
     else:
         parser.print_help()
 
