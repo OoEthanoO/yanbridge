@@ -10,6 +10,7 @@ import time
 CONFIG_PATH = os.path.expanduser("~/.ybconfig.json")
 ROBOT_IP = "192.168.43.1"
 ADB_PORT = "5555"
+VERBOSE = False
 
 def load_config():
     if not os.path.exists(CONFIG_PATH):
@@ -31,11 +32,17 @@ def save_config(ssid, password):
     print(f"Saved configuration to {CONFIG_PATH}")
 
 def run_cmd(cmd, check=True, quiet=False):
-    if not quiet:
+    if not quiet or VERBOSE:
         print(f"> {' '.join(cmd)}")
     result = subprocess.run(cmd, capture_output=True, text=True)
+    if VERBOSE:
+        if result.stdout.strip():
+            print(f"  stdout: {result.stdout.strip()}")
+        if result.stderr.strip():
+            print(f"  stderr: {result.stderr.strip()}")
+        print(f"  exit code: {result.returncode}")
     if check and result.returncode != 0:
-        if not quiet:
+        if not quiet or VERBOSE:
             print(f"Command failed with code {result.returncode}")
             print(result.stdout)
             print(result.stderr)
@@ -93,7 +100,17 @@ def get_wifi_power():
 def connect_wifi(ssid, password):
     print(f"Connecting to Wi-Fi network: {ssid}...")
     if sys.platform == "linux" or sys.platform == "linux2":
-        result = run_cmd(["nmcli", "dev", "wifi", "connect", ssid, "password", password], check=False)
+        cmd = ["nmcli", "device", "wifi", "connect", ssid, "--ask"]
+        if not VERBOSE:
+            print(f"> {' '.join(cmd)}")
+        result = subprocess.run(cmd, input=password + "\n", capture_output=True, text=True)
+        if VERBOSE:
+            print(f"> {' '.join(cmd)}")
+            if result.stdout.strip():
+                print(f"  stdout: {result.stdout.strip()}")
+            if result.stderr.strip():
+                print(f"  stderr: {result.stderr.strip()}")
+            print(f"  exit code: {result.returncode}")
         if result.returncode != 0:
             print(f"Error connecting to network {ssid}:")
             print(result.stdout.strip() if result.stdout.strip() else "Failed silently or password incorrect.")
@@ -176,6 +193,8 @@ def main():
     push_parser = subparsers.add_parser("push", help="Push code to the Control Hub")
     push_parser.add_argument("type", nargs="?", choices=["sloth", "teamcode"], default="sloth", 
                              help="Type of push to perform: 'sloth' (Sloth Load) or 'teamcode' (Standard install)")
+    push_parser.add_argument("-v", "--verbose", action="store_true",
+                             help="Enable verbose output for debugging network and command issues")
 
     args = parser.parse_args()
 
@@ -183,6 +202,9 @@ def main():
         save_config(args.ssid, args.password)
     
     elif args.command == "push":
+        global VERBOSE
+        VERBOSE = args.verbose
+
         config = load_config()
         if not config:
             print("Error: No configuration found. Please run 'yb config --ssid <SSID> --password <PASSWORD>' first.")
