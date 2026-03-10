@@ -235,16 +235,26 @@ def main():
                     run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
                 print("Switched off Wi-Fi.")
             elif not original_wifi and original_power:
-                print("Disconnecting from Control Hub Wi-Fi (cycling Wi-Fi power) to auto-reconnect...")
+                print(f"Disconnecting from Control Hub Wi-Fi {robot_ssid} to auto-reconnect...")
                 if sys.platform == "linux" or sys.platform == "linux2":
                     run_cmd(["nmcli", "radio", "wifi", "off"], check=False, quiet=True)
                     time.sleep(1)
                     run_cmd(["nmcli", "radio", "wifi", "on"], check=False, quiet=True)
+                    print("Wi-Fi cycled. Your system should automatically rejoin your default network.")
                 else:
+                    # Step 1: Remove robot from preferred networks so macOS won't auto-rejoin it.
+                    run_cmd(["networksetup", "-removepreferredwirelessnetwork", "en0", robot_ssid], check=False, quiet=True)
+                    # Step 2: Power cycle Wi-Fi to force the active disconnection.
+                    # Since the robot SSID is no longer preferred, macOS will rejoin the
+                    # next known network (your home/school Wi-Fi) instead.
                     run_cmd(["networksetup", "-setairportpower", "en0", "off"], check=False, quiet=True)
                     time.sleep(1)
                     run_cmd(["networksetup", "-setairportpower", "en0", "on"], check=False, quiet=True)
-                print("Wi-Fi cycled. Your system should automatically rejoin your default network.")
+                    time.sleep(2)
+                    # No need to re-add the robot network to preferred list.
+                    # macOS will automatically save it as a known network the next time
+                    # connect_wifi explicitly connects with the SSID and password.
+                    print(f"Disconnected from {robot_ssid}. macOS should now rejoin your previous network.")
     else:
         parser.print_help()
 
